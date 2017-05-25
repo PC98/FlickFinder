@@ -119,6 +119,7 @@ class ViewController: UIViewController {
     // note the we can skip 'www' but not something like 'api' in 'api.flickr'
     
     private func displayImageFromFlickrBySearch(_ methodParameters: [String: AnyObject]) {
+        
         let url = URLRequest(url: flickrURLFromParameters(methodParameters))
         let task = URLSession.shared.dataTask(with: url) { (data, response, error) in
             
@@ -165,33 +166,99 @@ class ViewController: UIViewController {
             }
             
             /* GUARD: Are the "photos" and "photo" keys in our result? */
-            guard let photosDictionary = parsedResult[Constants.FlickrResponseKeys.Photos] as? [String:AnyObject], let photoArray = photosDictionary[Constants.FlickrResponseKeys.Photo] as? [[String:AnyObject]] else {
-                displayError("Cannot find keys '\(Constants.FlickrResponseKeys.Photos)' and '\(Constants.FlickrResponseKeys.Photo)' in \(parsedResult)")
+            guard let photosDictionary = parsedResult[Constants.FlickrResponseKeys.Photos] as? [String:AnyObject], let numOfPages = photosDictionary[Constants.FlickrResponseKeys.Pages] as? Int else {
+                displayError("Cannot find keys '\(Constants.FlickrResponseKeys.Photos)' and '\(Constants.FlickrResponseKeys.Pages)'")
                 return
             }
             
             // select a random photo
-            let randomPhotoIndex = Int(arc4random_uniform(UInt32(photoArray.count)))
-            let photoDictionary = photoArray[randomPhotoIndex] as [String:AnyObject]
-            let photoTitle = photoDictionary[Constants.FlickrResponseKeys.Title] as? String
             
-            /* GUARD: Does our photo have a key for 'url_m'? */
-            guard let imageUrlString = photoDictionary[Constants.FlickrResponseKeys.MediumURL] as? String else {
-                displayError("Cannot find key '\(Constants.FlickrResponseKeys.MediumURL)' in \(photoDictionary)")
-                return
-            }
+            // But our previos app wasn't really random. If you look at the API, several pages of data are returned and one of the URL query items is the page number you want to choose from. The API also limits the number of results returned in total (in all pages). So we first make a request to find out how many pages there are, then select a random page number. Then make a second request to that page.
             
-            // if an image exists at the url, set the image and title
-            let imageURL = URL(string: imageUrlString)
-            if let imageData = try? Data(contentsOf: imageURL!) {
-                performUIUpdatesOnMain {
-                    self.setUIEnabled(true)
-                    self.photoImageView.image = UIImage(data: imageData)
-                    self.photoTitleLabel.text = photoTitle ?? "(Untitled)"
+            // When working with networking requests, requests don't complete instantly. That's why a completion handler is used - I dont know when the request will complete, but when it does do this...
+            
+            // While the networking request is processing, our app keeps on running. Such a request is an ASYNCHRONOS REQUEST - the exceution of code in completetion block is deferred until the request completes. You can chain several asynchronos requests together - by putting one inside the completion handlr of the other.
+           
+            let randomPageIndex = Int(arc4random_uniform(UInt32(numOfPages))) + 1 // +1 is important!!
+            
+            // remeber than swift formal params are constants! methodParameters[Constants.FlickrParameterKeys.Page] = randomPageIndex
+            var methodParametersForAsynchRequest = methodParameters
+            methodParametersForAsynchRequest[Constants.FlickrParameterKeys.Page] = randomPageIndex as AnyObject
+            
+            print("\(numOfPages) \(randomPageIndex)")
+            
+            let url = URLRequest(url: self.flickrURLFromParameters(methodParametersForAsynchRequest)) // note than self is required here
+            let task = URLSession.shared.dataTask(with: url) { (data, response, error) in
+                
+                /* GUARD: Was there an error? */
+                guard (error == nil) else {
+                    displayError("There was an error with your request: \(String(describing: error))")
+                    return
                 }
-            } else {
-                displayError("Image does not exist at \(String(describing: imageURL))")
+                
+                /* GUARD: Did we get a successful 2XX response? */
+                guard let statusCode = (response as? HTTPURLResponse)?.statusCode, statusCode >= 200 && statusCode <= 299 else {
+                    displayError("Your request returned a status code other than 2xx!")
+                    return
+                }
+                
+                /* GUARD: Was there any data returned? */
+                guard let data = data else {
+                    displayError("No data was returned by the request!")
+                    return
+                }
+                
+                // parse the data
+                let parsedResult: [String:AnyObject]!
+                do {
+                    parsedResult = try JSONSerialization.jsonObject(with: data, options: .allowFragments) as! [String:AnyObject]
+                } catch {
+                    displayError("Could not parse the data as JSON: '\(data)'")
+                    return
+                }
+                
+                /* GUARD: Did Flickr return an error (stat != ok)? */
+                guard let stat = parsedResult[Constants.FlickrResponseKeys.Status] as? String, stat == Constants.FlickrResponseValues.OKStatus else {
+                    displayError("Flickr API returned an error. See error code and message in \(parsedResult)")
+                    return
+                }
+                
+                /* GUARD: Are the "photos" and "photo" keys in our result? */
+                guard let photosDictionary = parsedResult[Constants.FlickrResponseKeys.Photos] as? [String:AnyObject], let photoArray = photosDictionary[Constants.FlickrResponseKeys.Photo] as? [[String:AnyObject]], let pageExists = photosDictionary[Constants.FlickrResponseKeys.Page] as? Int else {
+                    displayError("Cannot find keys '\(Constants.FlickrResponseKeys.Photos)' and '\(Constants.FlickrResponseKeys.Photo)' in \(parsedResult) and '\(Constants.FlickrResponseKeys.Page)'")
+                    return
+                }
+                
+                guard (pageExists == randomPageIndex) else {
+                    displayError("Could not get results from a randommly selected page number")
+                    return
+                }
+                
+                // select a random photo
+                let randomPhotoIndex = Int(arc4random_uniform(UInt32(photoArray.count)))
+                let photoDictionary = photoArray[randomPhotoIndex] as [String:AnyObject]
+                let photoTitle = photoDictionary[Constants.FlickrResponseKeys.Title] as? String
+                
+                /* GUARD: Does our photo have a key for 'url_m'? */
+                guard let imageUrlString = photoDictionary[Constants.FlickrResponseKeys.MediumURL] as? String else {
+                    displayError("Cannot find key '\(Constants.FlickrResponseKeys.MediumURL)' in \(photoDictionary)")
+                    return
+                }
+                
+                // if an image exists at the url, set the image and title
+                let imageURL = URL(string: imageUrlString)
+                if let imageData = try? Data(contentsOf: imageURL!) {
+                    performUIUpdatesOnMain {
+                        self.setUIEnabled(true)
+                        self.photoImageView.image = UIImage(data: imageData)
+                        self.photoTitleLabel.text = photoTitle ?? "(Untitled)"
+                    }
+                } else {
+                    displayError("Image does not exist at \(String(describing: imageURL))")
+                }
+                
             }
+            task.resume()
         }
         task.resume()
     }
